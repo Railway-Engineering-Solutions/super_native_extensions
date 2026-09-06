@@ -44,6 +44,28 @@ class _DropItem extends DropItem {
   DataReader? _reader;
 }
 
+/// The view to hit test a drop against, or `null` to keep the legacy
+/// implicit-view behaviour.
+///
+/// [GestureBinding.hitTest] resolves the implicit view, which an app using
+/// Flutter's multi-window support does not have: the engine starts headless and
+/// every view is created from Dart. Hit testing then walks an empty path, no
+/// [RenderDropRegion] is ever found, and drops are refused with no error
+/// anywhere - the drag simply does nothing.
+///
+/// The native side cannot yet report which view a drag session is over (see the
+/// TODO in [_DropSession.update]), so only the unambiguous single-view case is
+/// resolved here. With several views the legacy call is kept, and so is the
+/// behaviour of every app that has an implicit view.
+int? _hitTestViewId() {
+  final dispatcher = ui.PlatformDispatcher.instance;
+  if (dispatcher.implicitView != null) {
+    return null;
+  }
+  final views = dispatcher.views;
+  return views.length == 1 ? views.first.viewId : null;
+}
+
 class _DropSession extends DropSession {
   @override
   List<DropItem> get items => _items;
@@ -106,9 +128,14 @@ class _DropSession extends DropSession {
     _inside = true;
 
     final hitTest = HitTestResult();
-    // TODO(knopp): Resolve when we can provide viewId from native side
-    // ignore: deprecated_member_use
-    GestureBinding.instance.hitTest(hitTest, position);
+    final viewId = _hitTestViewId();
+    if (viewId != null) {
+      GestureBinding.instance.hitTestInView(hitTest, position, viewId);
+    } else {
+      // TODO(knopp): Resolve when we can provide viewId from native side
+      // ignore: deprecated_member_use
+      GestureBinding.instance.hitTest(hitTest, position);
+    }
 
     final monitorsInHitTest = <RenderDropMonitor>{};
     RenderDropRegion? dropRegion;
