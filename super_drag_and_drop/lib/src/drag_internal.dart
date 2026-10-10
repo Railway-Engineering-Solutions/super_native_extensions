@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
@@ -406,6 +407,15 @@ void _initializeIfNeeded() async {
     _dragContext!.delegate = _DragContextDelegate();
     _longPressHandler = await raw.LongPressHandler.create();
     // needed on some platforms (i.e. Android for drop end notifications)
-    await raw.DropContext.instance();
+    //
+    // Not on Windows: creating the drop context registers the plugin's
+    // IDropTarget on the Flutter view's HWND, which takes every drop in that
+    // window ahead of a drop target the app registered on the window itself (a
+    // multi-window app with its own per-window drop service, say) - so merely
+    // building a draggable would kill the app's file drops. A DropRegion still
+    // creates it there, through DropFormatRegistry.
+    if (defaultTargetPlatform != TargetPlatform.windows) {
+      await raw.DropContext.instance();
+    }
   }
 }
