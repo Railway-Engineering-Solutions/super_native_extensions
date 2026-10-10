@@ -47,23 +47,22 @@ class _DropItem extends DropItem {
 /// The view to hit test a drop against, or `null` to keep the legacy
 /// implicit-view behaviour.
 ///
-/// [GestureBinding.hitTest] resolves the implicit view, which an app using
-/// Flutter's multi-window support does not have: the engine starts headless and
-/// every view is created from Dart. Hit testing then walks an empty path, no
+/// [GestureBinding.hitTest] resolves the implicit view. An app using Flutter's
+/// multi-window support renders into views it creates from Dart, and the
+/// implicit view - which the engine may still report, with nothing rendered
+/// into it - is not one of them. Hit testing it walks an empty path, no
 /// [RenderDropRegion] is ever found, and drops are refused with no error
-/// anywhere - the drag simply does nothing.
+/// anywhere: the drag simply does nothing.
 ///
-/// The native side cannot yet report which view a drag session is over (see the
-/// TODO in [_DropSession.update]), so only the unambiguous single-view case is
-/// resolved here. With several views the legacy call is kept, and so is the
-/// behaviour of every app that has an implicit view.
+/// So resolve the view from the ones the app actually renders into, rather
+/// than from [ui.PlatformDispatcher.views]. The native side cannot yet report
+/// which view a drag session is over (see the TODO in [_DropSession.update]),
+/// so only the unambiguous single-view case is resolved here. With several
+/// rendered views the legacy call is kept, and so is the behaviour of every
+/// app that renders into its implicit view.
 int? _hitTestViewId() {
-  final dispatcher = ui.PlatformDispatcher.instance;
-  if (dispatcher.implicitView != null) {
-    return null;
-  }
-  final views = dispatcher.views;
-  return views.length == 1 ? views.first.viewId : null;
+  final rendered = RendererBinding.instance.renderViews.toList();
+  return rendered.length == 1 ? rendered.single.flutterView.viewId : null;
 }
 
 class _DropSession extends DropSession {
