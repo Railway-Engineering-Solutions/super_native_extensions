@@ -64,6 +64,51 @@ class _RenderBaseDraggable extends RenderProxyBoxWithHitTestBehavior {
 
 //
 
+/// The view the mouse was over most recently, from any pointer event.
+///
+/// Native drag requests carry a location but not the view it is in (see the
+/// TODO this replaces). A drag always starts where the mouse is, and the mouse
+/// moves over a view before it presses there, so the last pointer event's view
+/// is the drag's view - including for `isLocationDraggable`, which macOS asks
+/// from inside its mouse-down handler, before Flutter has delivered that
+/// pointer-down to Dart.
+int? _lastPointerViewId;
+bool _trackingPointerView = false;
+
+void _trackPointerView() {
+  if (_trackingPointerView) return;
+  _trackingPointerView = true;
+  GestureBinding.instance.pointerRouter.addGlobalRoute((event) {
+    _lastPointerViewId = event.viewId;
+  });
+}
+
+/// The view a drag location should be hit tested in, or `null` for the legacy
+/// implicit-view call.
+///
+/// An app that renders into one view (every single-window app, and a
+/// multi-window app with one window open) needs no guess. With several, the
+/// view the pointer was last over decides - see [_lastPointerViewId].
+int? _dragViewId() {
+  final views = {
+    for (final view in RendererBinding.instance.renderViews)
+      view.flutterView.viewId,
+  };
+  if (views.length == 1) return views.single;
+  final last = _lastPointerViewId;
+  return last != null && views.contains(last) ? last : null;
+}
+
+void _hitTestDragLocation(HitTestResult result, Offset location) {
+  final viewId = _dragViewId();
+  if (viewId != null) {
+    GestureBinding.instance.hitTestInView(result, location, viewId);
+  } else {
+    // ignore: deprecated_member_use
+    GestureBinding.instance.hitTest(result, location);
+  }
+}
+
 class _DragContextDelegate implements raw.DragContextDelegate {
   @override
   Future<raw.DragConfiguration?> getConfigurationForDragRequest({
@@ -71,9 +116,7 @@ class _DragContextDelegate implements raw.DragContextDelegate {
     required raw.DragSession session,
   }) async {
     final hitTest = HitTestResult();
-    // TODO(knopp): Resolve when we can provide viewId from native side
-    // ignore: deprecated_member_use
-    GestureBinding.instance.hitTest(hitTest, location);
+    _hitTestDragLocation(hitTest, location);
     for (final item in hitTest.path) {
       final target = item.target;
       if (target is _RenderBaseDraggable &&
@@ -92,9 +135,7 @@ class _DragContextDelegate implements raw.DragContextDelegate {
   Future<List<raw.DragItem>?> getAdditionalItemsForLocation(
       {required Offset location, required raw.DragSession session}) async {
     final hitTest = HitTestResult();
-    // TODO(knopp): Resolve when we can provide viewId from native side
-    // ignore: deprecated_member_use
-    GestureBinding.instance.hitTest(hitTest, location);
+    _hitTestDragLocation(hitTest, location);
     for (final item in hitTest.path) {
       final target = item.target;
       if (target is _RenderBaseDraggable) {
@@ -111,9 +152,7 @@ class _DragContextDelegate implements raw.DragContextDelegate {
   @override
   bool isLocationDraggable(Offset location) {
     final hitTest = HitTestResult();
-    // TODO(knopp): Resolve when we can provide viewId from native side
-    // ignore: deprecated_member_use
-    GestureBinding.instance.hitTest(hitTest, location);
+    _hitTestDragLocation(hitTest, location);
     for (final item in hitTest.path) {
       final target = item.target;
       if (target is _RenderBaseDraggable) {
@@ -403,6 +442,7 @@ raw.LongPressHandler? _longPressHandler;
 void _initializeIfNeeded() async {
   if (!_initialized) {
     _initialized = true;
+    _trackPointerView();
     _dragContext = await raw.DragContext.instance();
     _dragContext!.delegate = _DragContextDelegate();
     _longPressHandler = await raw.LongPressHandler.create();

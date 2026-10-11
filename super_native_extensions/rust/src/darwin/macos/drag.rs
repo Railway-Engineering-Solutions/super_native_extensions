@@ -64,6 +64,10 @@ pub struct PlatformDragContext {
     delegate: Weak<dyn PlatformDragContextDelegate>,
     pub view: Id<NSView>,
     last_mouse_down_event: RefCell<Option<Id<NSEvent>>>,
+    /// The FlutterView [last_mouse_down_event] arrived in. An app with several
+    /// windows has a FlutterView per window but one context per engine, so a
+    /// drag has to start in the view the mouse went down in, not [view].
+    last_mouse_down_view: RefCell<Option<Id<NSView>>>,
     last_mouse_up_event: RefCell<Option<Id<NSEvent>>>,
     last_scroll_event: RefCell<Option<Id<NSEvent>>>,
     sessions: RefCell<HashMap<isize /* draggingSequenceNumber */, DragSession>>,
@@ -89,6 +93,7 @@ impl PlatformDragContext {
             delegate,
             view: unsafe { Id::cast(view) },
             last_mouse_down_event: RefCell::new(None),
+            last_mouse_down_view: RefCell::new(None),
             last_mouse_up_event: RefCell::new(None),
             last_scroll_event: RefCell::new(None),
             sessions: RefCell::new(HashMap::new()),
@@ -102,6 +107,16 @@ impl PlatformDragContext {
         });
     }
 
+    /// The view the drag in progress started in: where the last mouse down
+    /// landed, or the engine's view before any has.
+    fn drag_view(&self) -> Id<NSView> {
+        self.last_mouse_down_view
+            .borrow()
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| self.view.clone())
+    }
+
     unsafe fn finish_scroll_events(&self) {
         let event = { self.last_scroll_event.borrow().as_ref().cloned() };
         // Unfinished momentum events will cause pan gesture recognizer
@@ -112,6 +127,7 @@ impl PlatformDragContext {
                 && phase != NSEventPhase::Ended
                 && phase != NSEventPhase::Cancelled
             {
+                let window = event.window(self.main_thread_marker);
                 let event = event.CGEvent();
                 let event = CGEventCreateCopy(event);
                 CGEventSetIntegerValueField(
@@ -123,7 +139,6 @@ impl PlatformDragContext {
                 let synthesized = NSEvent::withCGEvent(event);
                 CFRelease(event as *mut _);
 
-                let window = self.view.window();
                 if let Some(window) = window {
                     window.sendEvent(&synthesized);
                 }
@@ -149,7 +164,7 @@ impl PlatformDragContext {
             let synthesized = NSEvent::withCGEvent(event);
             CFRelease(event as *mut _);
 
-            let window = self.view.window();
+            let window = original_event.window(self.main_thread_marker);
             if let Some(window) = window {
                 window.sendEvent(&synthesized);
             }
@@ -171,6 +186,7 @@ impl PlatformDragContext {
     ) -> NativeExtensionsResult<()> {
         unsafe { self.synthesize_mouse_up_event() };
 
+        let view = self.drag_view();
         let mut dragging_items = Vec::<Id<NSDraggingItem>>::new();
         let mut data_provider_handles = Vec::<_>::new();
 
@@ -190,7 +206,7 @@ impl PlatformDragContext {
 
             let image = &item.image;
             let mut rect: NSRect = image.rect.clone().into();
-            flip_rect(&self.view, &mut rect);
+            flip_rect(&view, &mut rect);
             let snapshot = ns_image_from_image_data(vec![image.image_data.clone()]);
 
             unsafe { dragging_item.setDraggingFrame_contents(rect, Some(&snapshot)) };
@@ -209,10 +225,10 @@ impl PlatformDragContext {
 
         let dragging_items = NSArray::from_vec(dragging_items);
         let session = unsafe {
-            self.view.beginDraggingSessionWithItems_event_source(
+            view.beginDraggingSessionWithItems_event_source(
                 &dragging_items,
                 &event,
-                &Id::cast(self.view.clone()),
+                &Id::cast(view.clone()),
             )
         };
 
@@ -234,7 +250,8 @@ impl PlatformDragContext {
         Ok(())
     }
 
-    fn on_mouse_down(&self, event: Id<NSEvent>) {
+    fn on_mouse_down(&self, view: Id<NSView>, event: Id<NSEvent>) {
+        self.last_mouse_down_view.replace(Some(view));
         self.last_mouse_down_event.replace(Some(event));
     }
 
@@ -242,7 +259,8 @@ impl PlatformDragContext {
         self.last_mouse_up_event.replace(Some(event));
     }
 
-    fn on_right_mouse_down(&self, event: Id<NSEvent>) {
+    fn on_right_mouse_down(&self, view: Id<NSView>, event: Id<NSEvent>) {
+        self.last_mouse_down_view.replace(Some(view));
         self.last_mouse_down_event.replace(Some(event));
     }
 
@@ -289,6 +307,7 @@ impl PlatformDragContext {
             // Missing event began. Instead of throwing it away synthesize event with phase began
             // so that tne engine can process it.
             unsafe {
+                let window = event.window(self.main_thread_marker);
                 let event = event.CGEvent();
                 let event = CGEventCreateCopy(event);
                 CGEventSetIntegerValueField(
@@ -299,7 +318,6 @@ impl PlatformDragContext {
                 let synthesized = NSEvent::withCGEvent(event);
                 CFRelease(event as *mut _);
 
-                let window = self.view.window();
                 if let Some(window) = window {
                     window.sendEvent(&synthesized);
                 }
@@ -319,7 +337,7 @@ impl PlatformDragContext {
                 }
             }
             let location = NSEvent::mouseLocation();
-            let window = self.view.window();
+            let window = self.drag_view().window();
             let Some(window) = window else { return };
             let window_frame = window.frame();
             let content_rect = window.contentRectForFrameRect(window_frame);
@@ -401,10 +419,10 @@ impl PlatformDragContext {
         }
     }
 
-    pub fn should_delay_window_ordering(&self, event: &NSEvent) -> bool {
+    pub fn should_delay_window_ordering(&self, view: &NSView, event: &NSEvent) -> bool {
         if unsafe { event.r#type() } == NSEventType::LeftMouseDown {
             let location: NSPoint = unsafe { event.locationInWindow() };
-            let location: NSPoint = self.view.convertPoint_fromView(location, None);
+            let location: NSPoint = view.convertPoint_fromView(location, None);
             if let Some(delegate) = self.delegate.upgrade() {
                 let is_draggable_promise = delegate.is_location_draggable(self.id, location.into());
                 let mut poll_session = PollSession::new();
@@ -545,8 +563,17 @@ where
     FR: FnOnce() -> R,
 {
     let this = this.retain();
+    // The context is registered for the engine's view, but every FlutterView
+    // shares this class. A view of another window belongs to the same engine
+    // when there is only one, so it falls back to that engine's context.
     let state = VIEW_TO_CONTEXT
-        .with(|v| v.borrow().get(&this).cloned())
+        .with(|v| {
+            let v = v.borrow();
+            v.get(&this).cloned().or_else(|| match v.len() {
+                1 => v.values().next().cloned(),
+                _ => None,
+            })
+        })
         .and_then(|a| a.upgrade());
     if let Some(state) = state {
         callback(state)
@@ -560,7 +587,11 @@ extern "C" fn mouse_down_can_move_window(_this: &NSView, _sel: Sel) -> Bool {
 }
 
 extern "C" fn mouse_down(this: &NSView, _sel: Sel, event: &NSEvent) {
-    with_state(this, |state| state.on_mouse_down(event.retain()), || ());
+    with_state(
+        this,
+        |state| state.on_mouse_down(this.retain(), event.retain()),
+        || (),
+    );
 
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), mouseDown: event];
@@ -578,7 +609,7 @@ extern "C" fn mouse_up(this: &NSView, _sel: Sel, event: &NSEvent) {
 extern "C" fn right_mouse_down(this: &NSView, _sel: Sel, event: &NSEvent) {
     with_state(
         this,
-        |state| state.on_right_mouse_down(event.retain()),
+        |state| state.on_right_mouse_down(this.retain(), event.retain()),
         || (),
     );
 
@@ -644,7 +675,7 @@ extern "C" fn should_delay_window_ordering(this: &NSView, _: Sel, event: &NSEven
     with_state(
         this,
         move |state| {
-            if state.should_delay_window_ordering(event) {
+            if state.should_delay_window_ordering(this, event) {
                 Bool::YES
             } else {
                 Bool::NO
